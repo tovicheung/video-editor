@@ -46,6 +46,9 @@ struct VideoEditorApp {
     last_play_update_time: Instant,
     
     pending_clip_transition: bool,
+
+    clip_drag_init: u32,
+    selected_clip: Option<usize>, // index
 }
 
 impl VideoEditorApp {
@@ -64,6 +67,8 @@ impl VideoEditorApp {
             is_playing: false,
             last_play_update_time: Instant::now(),
             pending_clip_transition: false,
+            clip_drag_init: 0,
+            selected_clip: None,
         }
     }
 }
@@ -142,6 +147,7 @@ impl eframe::App for VideoEditorApp {
                     }
                     if ui.button("Clear").clicked() {
                         self.clips.clear();
+                        // self.clips.clear();
                         self.playhead = 0;
                         self.video_player.send_command(PlayerCommand::StopPlayback);
                         self.is_playing = false;
@@ -218,7 +224,7 @@ impl eframe::App for VideoEditorApp {
                 if elapsed_ms > 0 {
                     self.playhead = (self.playhead + elapsed_ms).min(self.total_timeline_duration);
                     self.last_play_update_time = Instant::now();
-                }
+                }   
 
                 // reached  end of timeline
                 if self.playhead >= self.total_timeline_duration {
@@ -298,7 +304,7 @@ impl eframe::App for VideoEditorApp {
             }
 
             // request new clip to load
-            const MIN_FRAME_REQUEST_INTERVAL_MS_SCRUBBING: u32 = 100;
+            const MIN_FRAME_REQUEST_INTERVAL_MS_SCRUBBING: u32 = 300;
 
             let active_clip_idx = self.clips.iter().position(|c| {
                 let clip_timeline_end = c.timeline_start + (c.trim_end - c.trim_start);
@@ -344,6 +350,12 @@ impl eframe::App for VideoEditorApp {
                         self.last_playhead_update_time = Instant::now();
                     }
                 }
+            } else {
+                self.current_preview_texture = Some(ctx.load_texture(
+                    "video_preview_frame",
+                    egui::ColorImage::filled([PREVIEW_WIDTH as usize, PREVIEW_HEIGHT as usize], egui::Color32::BLACK),
+                    egui::TextureOptions::LINEAR,
+                ));
             }
 
             if self.is_playing {
@@ -354,34 +366,48 @@ impl eframe::App for VideoEditorApp {
 
             // timeline
             ui.label("Timeline");
-            let timeline_height = 100.0;
-            let (rect, _resp) = ui.allocate_at_least(egui::vec2(ui.available_width(), timeline_height), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(40));
+            let timeline_height = 60.0;
+            let (timeline_rect, _resp) = ui.allocate_at_least(egui::vec2(ui.available_width(), timeline_height), egui::Sense::hover());
+            ui.painter().rect_filled(timeline_rect, 4.0, egui::Color32::from_gray(40));
 
-            let time_to_x = |t: u32| rect.left() + (t as f32 / self.total_timeline_duration as f32) * rect.width();
-            let x_to_time = |x: f32| (((x - rect.left()) / rect.width()) * self.total_timeline_duration as f32).round() as u32;
+            let time_to_x = |t: u32| timeline_rect.left() + (t as f32 / self.total_timeline_duration as f32) * timeline_rect.width();
+            let x_to_time = |x: f32| (((x - timeline_rect.left()) / timeline_rect.width()) * self.total_timeline_duration as f32).round() as u32;
 
             let mut clip_to_update = None;
 
             for (idx, clip) in self.clips.iter().enumerate() {
+                let is_selected = self.selected_clip == Some(idx);
                 let clip_duration = clip.trim_end - clip.trim_start;
 
                 let start_x = time_to_x(clip.timeline_start);
                 let end_x = time_to_x(clip.timeline_start + clip_duration);
                 
-                let clip_rect = egui::Rect::from_x_y_ranges(start_x..=end_x, rect.top()..=rect.bottom());
-                ui.painter().rect_filled(clip_rect, 2.0, egui::Color32::from_rgb(60, 120, 180));
+                let clip_rect = egui::Rect::from_x_y_ranges(start_x..=end_x, timeline_rect.top()..=timeline_rect.bottom());
+                ui.painter().rect_filled(clip_rect, 2.0, if is_selected { egui::Color32::from_rgb(60, 60, 200) } else { egui::Color32::from_rgb(60, 120, 180) });
                 ui.painter().rect_stroke(clip_rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
 
                 let handle_w = 10.0;
-                let l_handle = egui::Rect::from_x_y_ranges(start_x..=(start_x + handle_w), rect.top()..=(rect.bottom() + 20.0));
-                let r_handle = egui::Rect::from_x_y_ranges((end_x - handle_w)..=end_x, rect.top()..=(rect.bottom() + 20.0));
+
+                let middle_drag_rect = egui::Rect::from_x_y_ranges(
+                    (start_x + handle_w)..=(end_x - handle_w),
+                    timeline_rect.top()..=timeline_rect.bottom(),
+                );
+                let l_handle = egui::Rect::from_x_y_ranges(start_x..=(start_x + handle_w), timeline_rect.top()..=timeline_rect.bottom());
+                let r_handle = egui::Rect::from_x_y_ranges((end_x - handle_w)..=end_x, timeline_rect.top()..=timeline_rect.bottom());
 
                 let l_res = ui.interact(l_handle, egui::Id::new((idx, "l")), egui::Sense::drag());
                 let r_res = ui.interact(r_handle, egui::Id::new((idx, "r")), egui::Sense::drag());
 
+                let middle_res = ui.interact(middle_drag_rect, egui::Id::new((idx, "middle")), egui::Sense::drag());
+
                 if l_res.hovered() || r_res.hovered() || l_res.dragged() || r_res.dragged() {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                } else if middle_res.hovered() || middle_res.dragged() {
+                    ctx.set_cursor_icon(if middle_res.dragged() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
                 }
 
                 if l_res.dragged() {
@@ -403,6 +429,43 @@ impl eframe::App for VideoEditorApp {
                         .clamp(clip.trim_start + MIN_CLIP_DURATION, clip.duration);
                     clip_to_update = Some((idx, clip.timeline_start, clip.trim_start, new_trim_end));
                 }
+                
+                if middle_res.drag_started() {
+                    println!("dragstart");
+                    self.clip_drag_init = clip.timeline_start;
+                    self.selected_clip = Some(idx);
+                }
+
+                if middle_res.dragged() {
+                    let pointer_pos = ctx.input(|i| i.pointer.press_origin()).unwrap_or_default();
+                    let current_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                    // println!("{} {}", pointer_pos, current_pos);
+
+                    let prev = self.clips.iter()
+                        .map(|c| { c.timeline_start + c.trim_end - c.trim_start })
+                        .filter(|timeline_end| { *timeline_end <= clip.timeline_start })
+                        .max()
+                        .unwrap_or(0);
+
+                    let timeline_end = clip.timeline_start + clip.trim_end - clip.trim_start;
+
+                    let next = self.clips.iter()
+                        .map(|c| { c.timeline_start })
+                        .filter(|timeline_start| { *timeline_start >= timeline_end })
+                        .min()
+                        .unwrap_or(self.total_timeline_duration)
+                         - clip_duration;
+
+                    // println!("{} {}   {}", prev, next, x_to_time(time_to_x(self.clip_drag_init) + current_pos.x - pointer_pos.x));
+                    let new_timeline_start = x_to_time(time_to_x(self.clip_drag_init) + current_pos.x - pointer_pos.x)
+                        .clamp(prev, next.max(0));
+                    
+                    clip_to_update = Some((idx, new_timeline_start, clip.trim_start, clip.trim_end));
+                }
+
+                if middle_res.drag_stopped() {
+                    self.clip_drag_init = 0;
+                }
 
                 ui.painter().rect_filled(l_handle, 2.0, egui::Color32::LIGHT_GREEN);
                 ui.painter().rect_filled(r_handle, 2.0, egui::Color32::LIGHT_GREEN);
@@ -422,27 +485,26 @@ impl eframe::App for VideoEditorApp {
                 self.clips[idx].trim_end = new_end;
             }
 
-            let timeline_res = ui.interact(rect, egui::Id::new("main_tl"), egui::Sense::click_and_drag());
-            if timeline_res.clicked() || timeline_res.dragged() {
-                if let Some(pos) = ctx.pointer_interact_pos() {
-                    let new_playhead = x_to_time(pos.x).clamp(0, self.total_timeline_duration);
-                    
-                    // stop playback when editing
-                    if self.is_playing {
-                        self.is_playing = false;
-                        self.video_player.send_command(PlayerCommand::StopPlayback);
-                    }
-                    
-                    self.playhead = new_playhead;
-                    self.last_requested_playhead_ms = u32::MAX; // Force frame refresh
-                }
+            let ph_x = time_to_x(self.playhead);
+
+            
+            let ph_rect = egui::Rect::from_x_y_ranges(ph_x-1.0..=ph_x+1.0, timeline_rect.top()-20.0..=timeline_rect.bottom());
+            ui.painter().rect_filled(ph_rect, 2.0, egui::Color32::RED);
+
+            let ph_jump_rect = egui::Rect::from_min_max(egui::pos2(timeline_rect.min.x, timeline_rect.min.y - 20.0), timeline_rect.max);
+            
+            let ph_jump_res = ui.interact(ph_jump_rect, egui::Id::new("ph_jump"), egui::Sense::drag());
+
+            if ph_jump_res.dragged() {
+                let pointer_x = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()).x;
+                self.playhead = x_to_time(pointer_x);
             }
 
-            let ph_x = time_to_x(self.playhead);
-            ui.painter().line_segment(
-                [egui::pos2(ph_x, rect.top() - 10.0), egui::pos2(ph_x, rect.bottom() + 10.0)],
-                egui::Stroke::new(2.0, egui::Color32::RED),
-            );
+
+            // ui.painter().line_segment(
+            //     [egui::pos2(ph_x, rect.top() - 30.0), egui::pos2(ph_x, rect.bottom())],
+            //     egui::Stroke::new(3.0, egui::Color32::RED),
+            // );
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
